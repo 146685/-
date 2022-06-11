@@ -1,0 +1,94 @@
+import pandas as pd
+from matplotlib import pyplot as plt
+
+# 文件路径，注意格式，python中的文件路径都需要反斜杠   /       否则盘符格式报错
+# 读取数据，注意格式，这里用的是read_excel函数,即查看EXCEL表格，后缀为     .xls         否则报文件类型错误
+df = pd.read_excel('C:/Users/Administrator/Desktop/下载专用文档/5月.xls')
+
+# 筛选没有完成的订单，即完成金额为0的订单，    如果不理解可以 df.info()   ，在控制台中查看文件的具体情况
+df.query('完成金额 > 0 ', inplace=True)
+
+# 编辑字典集，往来单位作为用户名，完成金额作为交易金额，交货日期和订单编号联立使用，确认客户下单数量
+df = df[['往来单位', '交货日期', '完成金额', '订单编号']]
+
+# 拼接R，注意调整时间，时间为：你下载的订单的最后一天
+r = df.groupby('往来单位')['交货日期'].max().reset_index()
+r['R'] = (pd.to_datetime('2022-06-01') - r['交货日期']).dt.days
+r = r[['往来单位', "R"]]
+
+# 拼接F，导出时间不准确，所以用两个标签同时确认
+df['订单标签'] = df['订单编号']
+dup_f = df.groupby(['往来单位', '订单标签'])['订单编号'].count().reset_index()
+f = dup_f.groupby('往来单位')['订单编号'].count().reset_index()
+f.columns = ["往来单位", "F"]
+
+# 拼接M，注意：这里使用的M值为平均值，模型不考虑个体极值
+sum_m = df.groupby('往来单位')['完成金额'].sum().reset_index()
+sum_m.columns = ['往来单位', '总支付金额']
+com_m = pd.merge(sum_m, f, left_on='往来单位', right_on='往来单位', how='inner')
+com_m['M'] = com_m['总支付金额'] / com_m['F']
+
+# 整合数据
+rfm = pd.merge(r, com_m, left_on="往来单位", right_on="往来单位", how="inner")
+rfm = rfm[['往来单位', 'R', 'F', 'M']]
+
+# 打分，区间左不取右取，如R{1-5}为5分，F{9-20}为1分，打分越细结果越好
+rfm['R-SCORE'] = pd.cut(rfm['R'], bins=(1, 5, 9, 12, 16, 10000000), labels=[5, 4, 3, 2, 1], right=False).astype(float)
+rfm['F-SCORE'] = pd.cut(rfm['F'], bins=[9, 20, 35, 55, 85, 10000], labels=[1, 2, 3, 4, 5], right=False).astype(float)
+rfm['M-SCORE'] = pd.cut(rfm['M'], bins=[150, 650, 1200, 2500, 4300, 10000000], labels=[1, 2, 3, 4, 5],
+                        right=False).astype(float)
+
+# 均值判定，如整体均分为2.3，    那么当分值高于于2.3分为true，表现为1       反之为false，表现为0
+rfm['R是否大于均值'] = (rfm['R-SCORE'] > rfm['R-SCORE'].mean() * 1)
+rfm['F是否大于均值'] = (rfm['F-SCORE'] > rfm['F-SCORE'].mean() * 1)
+rfm['M是否大于均值'] = (rfm['M-SCORE'] > rfm['M-SCORE'].mean() * 1)
+
+# R；F；M=100；10；1            权重可自行更改，无硬性要求
+rfm['人群数值'] = (rfm['R是否大于均值'] * 100 + rfm['F是否大于均值'] * 10 + rfm['M是否大于均值'] * 1)
+
+# 定义人群，以后你们有能力的可以更改我现在定义的权重比
+# 更改打分项目权重就一定要记得更改以下的定义项目！！！
+
+
+def transform_label(x):
+    if x == 111:                # 最近购买，高频次，高消费
+        label = "重要价值客户"
+    elif x == 11:               # 最近未购买，高频次，高消费
+        label = "重要价值流失预警客户"
+    elif x == 101:              # 最近购买，低频次，高消费
+        label = "频次深耕客户"
+    elif x == 1:                # 最近未购买，低频次，高消费
+        label = "高消费唤回客户"
+    elif x == 110:              # 最近购买，高频次，低消费
+        label = "消费潜力客户"
+    elif x == 100:              # 最近购买，低频次，低消费
+        label = "可能为新客户"
+    elif x == 10:               # 最近未购买，高频次，低消费
+        label = "一般客户"
+    elif x == 0:                # 最近未购买，低频次，低消费
+        label = "流失客户"
+    return label
+
+
+rfm['人群类型'] = (rfm['人群数值'].apply(transform_label))
+plt.rcParams['font.family'] = ['Microsoft YaHei']       # 这里定义使用中文，不然你看不懂你的图
+
+# 求比值，每种客户占总体的比重
+# 人群比重
+count = rfm['人群类型'].value_counts().reset_index()
+count.columns = ['客户类型', '人数']
+count['人数占比'] = count['人数']/count['人数'].sum()
+
+rfm['人群类型'].value_counts().plot(kind='pie',             # 这个是图片类型，这里选择的是扇形图
+                                figsize=(12, 9),           # 图片规格，我这里放的是12*9的，也可以更改成小一点的，不影响实际使用
+                                autopct='%.1f%%',          # 导入输出格式，第一个%是格式符，.1表示输出值只精确到0.1，%%表示输出一个%号
+                                title='RFM用户分类',        # 文图标题，随便改改还能继续再下一个环节用
+                                textprops={'fontsize': 8},   # 文本属性，fontsize翻译就是字体大小
+                                subplots=True)
+plt.legend(loc=2, bbox_to_anchor=(1.05, 1.0), borderaxespad=0.)
+
+# 金额比重
+rfm['购买总金额'] = rfm['F']*rfm['M']
+mon = rfm.groupby('人群类型')['购买总金额'].sum().reset_index()
+mon.columns = ['客户类型', '完成金额']
+mon['金额占比'] = mon['完成金额']/mon['完成金额'].sum()
